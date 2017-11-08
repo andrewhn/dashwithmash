@@ -4,10 +4,12 @@ import uuid
 import logging
 import random
 
+
 logging.basicConfig(level=logging.DEBUG)
 
 
-mkid = lambda: str(uuid.uuid4())[:4]
+def make_id():
+    return str(uuid.uuid4())[:4]
 
 
 class Player():
@@ -15,7 +17,7 @@ class Player():
     registered = {}
 
     def __init__(self, conn):
-        self.id = mkid()
+        self.id = make_id()
         logging.debug("initialising player {}".format(self.id))
         self.conn = conn
         self.game = None
@@ -31,13 +33,8 @@ class Player():
 
         logging.info("{} exiting".format(self.id))
         if self.game is not None:
-            self.game.remove_player(self)
             logging.info("removing player {}".format(self.id))
-            for p in self.game.players:
-                p.broadcast("joined", [p.name for p in self.game.players])
-            if len(self.game.players) == 1:
-                logging.debug("resetting game")
-                self.game.reset()
+            self.game.remove_player(self)
             self.game = None
 
     def handle_message(self, message):
@@ -49,23 +46,20 @@ class Player():
         elif action == "re-join":
             payload = {"name": self.name}
             if self.game is not None:
+                nxt = self.game.handle_rejoin(self)
                 payload.update({
+                    ## administrative info
                     "gameId": self.game.id,
                     "creator": self.game.creator == self,
                     "players": [p.name for p in self.game.players],
-                    "category": self.game.category,
-                    "clue": self.game.clue,
-                    "responsesReceived": self.game.answers_received,
+                    ## game state info
+                    "next": nxt,  # pick up where we left off
                 })
             else:
                 payload.update({
                     "creator": False,
                     "players": [],
                 })
-            if self.game is not None:
-                ## pick up where we left off, let the player know the state of the game
-                action, data = self.game.handle_rejoin(self)
-                payload["next"] = {"action": action, "message": data}
             self.broadcast("re-joined", payload)
         elif action == "category-change":
             self.game.set_category(message["payload"])
@@ -99,8 +93,8 @@ class Player():
         elif action == "leave":
             self.exit()
 
-    def broadcast(self, action, message):
-        msg = {"action": action, "message": message}
+    def broadcast(self, action, payload):
+        msg = {"action": action, "payload": payload}
         logging.debug("player {} broadcasting {}".format(self.id, json.dumps(msg)))
         try:
             self.conn.write_message(json.dumps(msg))
@@ -113,7 +107,7 @@ class Game():
     registered = {}
 
     def __init__(self, player):
-        self.id = mkid()
+        self.id = make_id()
         self.players = []
         self._dasher_index = 0
         self.dasher = None
@@ -142,46 +136,63 @@ class Game():
         random.shuffle(formatted)  # n.b. inplace
         return formatted
 
-    def set_category(self, category, notify_dasher=False):
+    def set_category(self, category, notify=True):
         self.category = category
-        for player in self.players:
-            if player != self.dasher or notify_dasher:
-                player.broadcast("category-change", category)
+        if notify:
+            for player in self.players:
+                if player != self.dasher:
+                    player.broadcast("category-change", category)
 
-    def set_clue(self, clue, notify_dasher=False):
+    def set_clue(self, clue, notify=True):
         self.clue = clue
-        for player in self.players:
-            if player != self.dasher or notify_dasher:
-                player.broadcast("clue-change", clue)
+        if notify:
+            for player in self.players:
+                if player != self.dasher:
+                    player.broadcast("clue-change", clue)
 
     def reset(self):
         self._dasher_index = 0
         self.dasher = None
+        player_list = [p.name for p in self.players]
+        for p in self.players:
+            p.broadcast("waiting", player_list)
 
     def handle_rejoin(self, player):
-        ## inform re-joining player of current state of game
+        """
+        After re-joining (e.g. refresh, phone sleeps etc), player needs to be
+        brought up to date. This method works out what the player needs to know
+        """
+
+        ## rejoining player will receive some basic state info, and a 'next'
+        ## message directing their client to the right view
+        make_nxt = lambda a, m: {"action": a, "payload": m}
+
         if self.dasher is not None:
             ## we're in a game
             if all(a is not None for a in self.answers.values()):
                 ## everyone has answered
                 if self.dasher == player:
-                    return ("read-answers", self.formatted_answers)
+                    return make_nxt("read-answers", self.formatted_answers)
                 else:
-                    return ("listen-to-reading", "")
+                    return make_nxt("listen-to-reading", None)
             else:
                 if self.dasher == player:
-                    return ("dasher", {
+                    return make_nxt("dasher", {
                         "responsesReceived": self.answers_received,
                         "answerReceived": self.answers[player.id] is not None,
+                        "clue": self.clue,
+                        "category": self.category,
                     })
                 else:
-                    return ("pls-answer", {
+                    return make_nxt("pls-answer", {
                         "answerReceived": self.answers[player.id] is not None,
+                        "clue": self.clue,
+                        "category": self.category,
                     })
                 if self.answers.get(player.id, None):
-                    return ("got-answer", "")
+                    return make_nxt("got-answer", "")
         else:
-            return ("waiting", [p.name for p in self.players])
+            return make_nxt("waiting", [p.name for p in self.players])
 
     def add_player(self, player):
         if player not in self.players:
@@ -194,6 +205,26 @@ class Game():
                 remove_idx = i
         if remove_idx is not None:
             self.players.pop(remove_idx)
+            if player == self.creator:
+                for p in self.players:
+                    p.broadcast("error", "creator-left")
+                    ## clear up any references to this game, so it gets gc'd
+                    p.game = None
+                    del Game.registered[self.id]
+                    return  # don't reset
+            else:
+                if player == self.dasher:
+                    self.reset()
+                else:
+                    ## notify all other clients that the player left
+                    for p in self.players:
+                        p.broadcast("joined", [p.name for p in self.players])
+                    ## clear their answer
+                    if player.id in self.answers:
+                        del self.answers[player.id]
+
+        if len(self.players) == 1:
+            self.reset()
 
     def handle_answer(self, player, answer):
         logging.debug("got answer from player " + str(player.id) + ": " + answer)
@@ -219,17 +250,21 @@ class Game():
             self._dasher_index = 0
         self.answers = {p.id: None for p in self.players}
         self._dasher_index = (self._dasher_index + 1) % len(self.players)
-        self.set_category(None, notify_dasher=True)
-        self.set_clue(None, notify_dasher=True)
+        self.set_clue(None, notify=False)
+        self.set_category(None, notify=False)
         for p in self.players:
             if p == self.dasher:
                 p.broadcast("dasher", {
-                    "responsesReceived": self.answers_received,
-                    "answerReceived": self.answers[p.id] is not None,
+                    "responsesReceived": 0,
+                    "answerReceived": False,
+                    "category": None,
+                    "clue": None,
                 })
             else:
                 p.broadcast("pls-answer", {
-                    "answerReceived": self.answers[p.id] is not None,
+                    "answerReceived": False,
+                    "category": None,
+                    "clue": None,
                 })
 
 
@@ -243,7 +278,7 @@ class ConnectionHandler(websocket.WebSocketHandler):
         pass
 
     def _write_error(self, msg):
-        payload = {"action": "error", "message": msg}
+        payload = {"action": "error", "payload": msg}
         self.write_message(json.dumps(payload))
 
     def on_message(self, message):

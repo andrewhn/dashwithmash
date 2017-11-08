@@ -29,6 +29,8 @@ const contentStyle = () => {
   }
 };
 
+const TEMP_ANSWER_KEY = "tmp-answer";
+
 export default class AppContainer extends React.Component {
 
   constructor(props) {
@@ -44,6 +46,7 @@ export default class AppContainer extends React.Component {
         title: '',
         content: '',
       },
+      leaveDialogOpen: false,
       category: null,
       clue: '',
       answerText: '',
@@ -68,6 +71,8 @@ export default class AppContainer extends React.Component {
     this._onLogOut = this._onLogOut.bind(this);
     this._onCategoryChange = this._onCategoryChange.bind(this);
     this._onClueChange = this._onClueChange.bind(this);
+    this._onLeaveDialogClose = this._onLeaveDialogClose.bind(this);
+    this._onLeaveConfirm = this._onLeaveConfirm.bind(this);
 
     // change listeners
     SocketStore.addChangeListener(this._onMessage);
@@ -89,10 +94,11 @@ export default class AppContainer extends React.Component {
     }
 
     const message = SocketStore.getMessage();
+    const payload = message.payload;
     let state, tmpAnswer;
     switch (message.action) {
       case 'error':
-        switch(message.message) {
+        switch(payload) {
           case "game-not-found":
             // user typed in this code, so need to inform them code
             // is wrong
@@ -117,13 +123,22 @@ export default class AppContainer extends React.Component {
               }
             })
             break;
+          case "creator-left":
+            this.setState({
+              stage: 'initial',
+              error: {
+                open: true,
+                title: 'Game creator left',
+                content: 'The game creator left! You\'ll need to start a new game to continue playing',
+              }
+            })
+            break;
         }
         break;
       case 're-joined':
-        let payload = message.message;
         this.setState({
           name: payload.name,
-          game: payload.gameId,
+          game: payload.gameId || '',
           creator: payload.creator,
           playersInGame: payload.players.length,
           playerList: payload.players,
@@ -133,74 +148,82 @@ export default class AppContainer extends React.Component {
         });
         if (payload.next) {
           Actions.mockWSData(payload.next);
+        } else {
+          this.setState({stage: 'initial'})
         }
         break;
       case 'got-name':
-        localStorage.setItem('playerId', message.message);
+        localStorage.setItem('playerId', payload);
         this.setState({stage: 'initial'});
-        if (this.state.game) {
-          Actions.sendWSData('join', this.state.game);
-        }
         break;
       case 'created':
         this.setState({
           stage: 'waiting',
           playersInGame: 1,
-          game: message.message,
+          game: payload,
         })
         break;
       case 'joined':
+        this.setState({
+          playersInGame: payload.length,
+          playerList: payload,
+        });
+        break;
       case 'waiting':
         this.setState({
           stage: 'waiting',
-          playersInGame: message.message.length,
-          playerList: message.message,
+          playersInGame: payload.length,
+          playerList: payload,
         })
         break;
       case 'dasher':
-        tmpAnswer = localStorage.getItem("tmp-answer") || "";  // if re-connecting
+        tmpAnswer = localStorage.getItem(TEMP_ANSWER_KEY) || "";  // if re-connecting
         this.setState({
           stage: 'dasher',
           answerText: tmpAnswer,
-          answerReceived: message.message.answerReceived,
-          responsesReceived: message.message.responsesReceived,
+          answerReceived: payload.answerReceived,
+          responsesReceived: payload.responsesReceived,
+          clue: payload.clue || '',
+          category: payload.category || '',
         })
         break;
       case 'pls-answer':
-        tmpAnswer = localStorage.getItem("tmp-answer") || "";  // if re-connecting
+        tmpAnswer = localStorage.getItem(TEMP_ANSWER_KEY) || "";  // if re-connecting
         this.setState({
           stage: 'answering',
           answerText: tmpAnswer,
-          answerReceived: message.message.answerReceived,
+          answerReceived: payload.answerReceived,
+          clue: payload.clue || '',
+          category: payload.category || '',
         })
         break;
       case 'got-answer':
         this.setState({answerReceived: true});
         break;
       case 'player-sent-answer':
-        this.setState({responsesReceived: message.message});
+        this.setState({responsesReceived: payload});
         break;
       case 'read-answers':
-        localStorage.setItem("tmp-answer", "");
+        localStorage.setItem(TEMP_ANSWER_KEY, "");
         this.setState({
           stage: "reading",
-          playerAnswers: message.message.map(d => {
+          playerAnswers: payload.map(d => {
             d.votes = 0;
             return d;
           }),
         })
         break;
       case 'listen-to-reading':
-        localStorage.setItem("tmp-answer", "");
+        localStorage.setItem(TEMP_ANSWER_KEY, "");
         this.setState({
           stage: "listen-to-reading",
         })
         break;
       case 'category-change':
-        this.setState({category: message.message || ''});
+        this.setState({category: payload || ''});
         break;
       case 'clue-change':
-        this.setState({clue: message.message || ''});
+        this.setState({clue: payload || ''});
         break;
     }
   }
@@ -214,7 +237,7 @@ export default class AppContainer extends React.Component {
   }
 
   _onJoin() {
-    localStorage.removeItem("tmp-answer");
+    localStorage.removeItem(TEMP_ANSWER_KEY);
     this.setState({
       stage: 'join',
       creator: false,
@@ -244,7 +267,7 @@ export default class AppContainer extends React.Component {
   }
 
   _onAnswerChange(evt, value) {
-    localStorage.setItem("tmp-answer", value);
+    localStorage.setItem(TEMP_ANSWER_KEY, value);
     this.setState({answerText: value});
   }
 
@@ -256,9 +279,25 @@ export default class AppContainer extends React.Component {
     this.setState({game: value})
   }
 
-  _onLeave() {
+  _onLeaveConfirm() {
     Actions.sendWSData("leave", "");
-    this.setState({game: "", stage: "initial"});
+    this.setState({
+      game: "",
+      stage: "initial",
+      leaveDialogOpen: false,
+    });
+  }
+
+  _onLeave() {
+    this.setState({
+      leaveDialogOpen: true,
+    });
+  }
+
+  _onLeaveDialogClose() {
+    this.setState({
+      leaveDialogOpen: false,
+    });
   }
 
   _onAddVote(idx) {
@@ -300,7 +339,7 @@ export default class AppContainer extends React.Component {
     this.setState({clue: value});
     setTimeout(() => {
       if (value == this.state.clue) {
-        // check if user has finished typing
+        // check if user has finished typing (300ms)
         Actions.sendWSData("clue-change", value);
       }
     }, 300);
@@ -331,7 +370,10 @@ export default class AppContainer extends React.Component {
               <RaisedButton label="Done" primary={true} fullWidth={true} onClick={this._onSubmitIdentity}/>
             </div>
           </div>;
-          setTimeout(() => document.getElementById("name-input").focus(), 300);
+          setTimeout(() => {
+            const elt = document.getElementById("name-input");
+            if (elt) elt.focus();
+          }, 300);
           break;
       case 'initial':
         content = <div style={contentStyle()}>
@@ -357,9 +399,18 @@ export default class AppContainer extends React.Component {
               <p style={{textAlign: 'center'}}>Game code is</p>
               <p style={{textAlign: 'center', fontSize: "30px"}}>{this.state.game}</p>
               <p style={{textAlign: 'center'}}>Waiting for other players to join (currently {this.state.playersInGame})</p>
+              <hr />
               {this.state.playerList.map((p, i) => {
-                return <p style={{textAlign: 'center', margin: "0px", padding: "0px", lineHeight: "15px"}} key={i}>{p}</p>;
+                const style = {
+                  textAlign: 'center',
+                  margin: "0px",
+                  padding: "0px",
+                  lineHeight: "20px",
+                  fontSize: "18px",
+                }
+                return <p style={style} key={i}>{p}</p>;
               })}
+            <hr />
             </div>
             {startButton}
           </div>
@@ -380,7 +431,10 @@ export default class AppContainer extends React.Component {
           <RaisedButton label="Done" primary={true} fullWidth={true} onClick={this._onSubmitGame}/>
           <RaisedButton label="Cancel" secondary={true} fullWidth={true} onClick={this._onCancelJoin}/>
         </div>;
-        setTimeout(() => document.getElementById("game-code-input").focus(), 300);
+        setTimeout(() => {
+          const elt = document.getElementById("game-code-input");
+          if (elt) elt.focus();
+        }, 300);
         break;
       case 'dasher':
         content = <div style={contentStyle()}>
@@ -481,19 +535,34 @@ export default class AppContainer extends React.Component {
           break;
     }
 
-    const dialogActions = [
+    const errorDialogActions = [
       <FlatButton label="Close" primary={true} onClick={this._onErrorDialogClose} />,
+    ];
+
+    const leaveDialogActions = [
+      <FlatButton label="Cancel" secondary={true} onClick={this._onLeaveDialogClose} />,
+      <FlatButton label="Leave" primary={true} onClick={this._onLeaveConfirm} />,
     ];
 
     return <MuiThemeProvider>
       <div>
+
         {content}
+
         <Dialog title={this.state.error.title}
-                actions={dialogActions}
+                actions={errorDialogActions}
                 modal={false}
                 open={this.state.error.open}
                 onRequestClose={this._onErrorDialogClose} >
           {this.state.error.content}
+        </Dialog>
+
+        <Dialog title="Are you sure"
+                actions={leaveDialogActions}
+                modal={false}
+                open={this.state.leaveDialogOpen}
+                onRequestClose={this._onLeaveDialogClose} >
+            <p>Are you sure you want to leave the game?</p>
         </Dialog>
       </div>
     </MuiThemeProvider>;

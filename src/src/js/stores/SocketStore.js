@@ -5,13 +5,19 @@ import assign from 'object-assign';
 
 let _data;
 let _requiresReconnect = false;
+const _queue = [];  // fifo
 
 const _connect = () => {
 
+  // let _connection = new WebSocket("wss://dashwithmash.com/ws");
   let _connection = new WebSocket("ws://10.1.1.9:8081");
 
   _connection.onopen = () => {
     _requiresReconnect = false;
+    while (_queue.length) {
+      _connection.send(_queue.shift());
+    }
+    // SocketStore.emitChange();
   }
 
   _connection.onmessage = message => {
@@ -30,6 +36,10 @@ const _connect = () => {
 let _connection = _connect();
 
 const SocketStore = assign({}, BaseStore, {
+
+  isConnected() {
+    return _connection.readyState == 1;
+  },
 
   getMessage() {
     return _data;
@@ -51,10 +61,10 @@ const SocketStore = assign({}, BaseStore, {
         _connection = _connect();
       case Constants.ActionTypes.SEND_WS_DATA:
         const msgPayload = JSON.stringify(action.data);
-        if (_connection.readyState === 1) {
+        if (_connection.readyState == 1) {
           _connection.send(msgPayload);
         } else {
-          setTimeout(() => _connection.send(msgPayload), 500);
+          _queue.push(msgPayload);
         }
         break;
     }
