@@ -92,6 +92,12 @@ class Player():
             self.game.dasher.broadcast("player-sent-answer", self.game.answers_received)
         elif action == "leave":
             self.exit()
+        elif action == "add-vote":
+            self.game.add_vote(self, message["payload"])
+        elif action == "remove-vote":
+            self.game.remove_vote(self, message["payload"])
+        elif action == "calculate-scores":
+            self.game.calculate_scores()
 
     def broadcast(self, action, payload):
         msg = {"action": action, "payload": payload}
@@ -115,6 +121,9 @@ class Game():
         self.category = None
         self.clue = None
         self.answers = {}
+        self.shuffled_answers = []
+        self.votes = {}  # player -> player (vote caster -> votee)
+        self.scores_finalised = False
         Game.registered[self.id] = self
 
     @property
@@ -124,17 +133,62 @@ class Game():
     @property
     def formatted_answers(self):
         formatted = []
-        for player in self.players:
-            if player.id not in self.answers:
-                logging.error("Player id not in answers: {} {}".format(player.id, self.answers))
-                continue
-            if player == self.dasher:
-                name = "{} (Dasher)".format(player.name)
-            else:
-                name = player.name
-            formatted.append({"name": name, "answer": self.answers[player.id]})
-        random.shuffle(formatted)  # n.b. inplace
+        for player, answer in self.shuffled_answers:
+            votes = [c.name for c, v in self.votes.items() if v == player]
+            formatted.append({
+                "name": player.name,
+                "answer": answer,
+                "votes": votes
+            })
         return formatted
+
+    @property
+    def yet_to_vote(self):
+        return [p.name for p in self.players if p not in self.votes and p != self.dasher]
+
+    @property
+    def vote_stage_payload(self):
+        return {"answers": self.formatted_answers, "yetToVote": self.yet_to_vote}
+
+    @property
+    def calculated_scores(self):
+        scores = []
+        for p in self.players:
+            if p == self.dasher:
+                correct_voters = [p for p in self.votes.values() if p == self.dasher]
+                if len(correct_voters) == 0:
+                    points = 3
+                    details = ["No-one guessed the right answer"]
+                else:
+                    points = 0
+                    details = []
+                scores.append({
+                    "name": p.name,
+                    "points": points,
+                    "details": details,
+                })
+            else:
+                ## did i guess the right answer
+                correct = self.votes[p] == self.dasher
+                votes = self.count_votes(p)
+                correct_score = 2 * int(correct)
+                ## my votes + 2 points if i got the right answer
+                details = []
+                if votes > 0:
+                    details.append("{} point{} for being voted for".format(votes, "s" if votes != 1 else ""))
+                if correct:
+                    details.append("2 points for guessing the right answer")
+                scores.append({
+                    "name": p.name,
+                    "points": votes + correct_score,
+                    "details": details
+                })
+        return scores
+
+    def calculate_scores(self):
+        self.scores_finalised = True
+        for p in self.players:
+            p.broadcast("show-scores", self.calculated_scores)
 
     def set_category(self, category, notify=True):
         self.category = category
@@ -153,6 +207,7 @@ class Game():
     def reset(self):
         self._dasher_index = 0
         self.dasher = None
+        self.votes = {}
         player_list = [p.name for p in self.players]
         for p in self.players:
             p.broadcast("waiting", player_list)
@@ -168,11 +223,14 @@ class Game():
         make_nxt = lambda a, m: {"action": a, "payload": m}
 
         if self.dasher is not None:
+            if self.scores_finalised:
+                for p in self.players:
+                    return make_nxt("show-scores", self.calculated_scores)
             ## we're in a game
-            if all(a is not None for a in self.answers.values()):
+            elif all(a is not None for a in self.answers.values()):
                 ## everyone has answered
                 if self.dasher == player:
-                    return make_nxt("read-answers", self.formatted_answers)
+                    return make_nxt("read-answers", self.vote_stage_payload)
                 else:
                     return make_nxt("listen-to-reading", None)
             else:
@@ -226,13 +284,27 @@ class Game():
         if len(self.players) == 1:
             self.reset()
 
+    def prep_answers_for_vote(self):
+        """
+        Shuffle answers and store (retain order)
+        """
+        clean = []
+        for player in self.players:
+            if player.id not in self.answers:
+                logging.error("Player id not in answers: {} {}".format(player.id, self.answers))
+                continue
+            clean.append((player, self.answers[player.id]))
+        random.shuffle(clean)  # n.b. inplace
+        self.shuffled_answers = clean
+
     def handle_answer(self, player, answer):
         logging.debug("got answer from player " + str(player.id) + ": " + answer)
         assert player in self.players
         self.answers[player.id] = answer
         if all(a is not None for a in self.answers.values()):
+            self.prep_answers_for_vote()
             ## round is complete, send answers to dasher
-            self.dasher.broadcast("read-answers", self.formatted_answers)
+            self.dasher.broadcast("read-answers", self.vote_stage_payload)
             for p in self.players:
                 if p != self.dasher:
                     p.broadcast("listen-to-reading", "")
@@ -249,6 +321,8 @@ class Game():
             self.dasher = self.players[0]
             self._dasher_index = 0
         self.answers = {p.id: None for p in self.players}
+        self.scores_finalised = False
+        self.votes = {}
         self._dasher_index = (self._dasher_index + 1) % len(self.players)
         self.set_clue(None, notify=False)
         self.set_category(None, notify=False)
@@ -266,6 +340,27 @@ class Game():
                     "category": None,
                     "clue": None,
                 })
+
+    def count_votes(self, player):
+        votes = [p for v, p in self.votes.items() if p == player and v != p]  # can't self-vote
+        return len(votes)
+
+    def add_vote(self, _, payload):
+        ## TODO: error handling
+        [player_who_voted] = [p for p in self.players if p.name == payload["who"]]
+        [player_voted_for] = [p for p in self.players if p.name == payload["votedFor"]]
+        self.votes[player_who_voted] = player_voted_for
+        self.dasher.broadcast("read-answers", self.vote_stage_payload)
+        for p in self.players:
+            p.broadcast("votes-for-me", self.count_votes(p))
+
+    def remove_vote(self, _, player_name):
+        ## TODO: error handling
+        [player] = [p for p in self.players if p.name == player_name]
+        del self.votes[player]
+        self.dasher.broadcast("read-answers", self.vote_stage_payload)
+        for p in self.players:
+            p.broadcast("votes-for-me", self.count_votes(p))
 
 
 class ConnectionHandler(websocket.WebSocketHandler):

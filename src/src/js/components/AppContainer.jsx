@@ -12,6 +12,7 @@ import {
   Dialog,
   SelectField,
   MenuItem,
+  Chip,
 } from 'material-ui';
 import MuiThemeProvider from 'material-ui/styles/MuiThemeProvider';
 import SocketStore from '../stores/SocketStore';
@@ -207,16 +208,21 @@ export default class AppContainer extends React.Component {
         localStorage.setItem(TEMP_ANSWER_KEY, "");
         this.setState({
           stage: "reading",
-          playerAnswers: payload.map(d => {
-            d.votes = 0;
-            return d;
-          }),
+          playerAnswers: payload.answers,
+          toVote: payload.yetToVote,
         })
         break;
       case 'listen-to-reading':
         localStorage.setItem(TEMP_ANSWER_KEY, "");
         this.setState({
           stage: "listen-to-reading",
+          myVotes: 0,
+        })
+        break;
+      case 'show-scores':
+        this.setState({
+          stage: "scoring",
+          scoreDetails: payload,
         })
         break;
       case 'category-change':
@@ -224,6 +230,9 @@ export default class AppContainer extends React.Component {
         break;
       case 'clue-change':
         this.setState({clue: payload || ''});
+        break;
+      case 'votes-for-me':
+        this.setState({myVotes: payload});
         break;
     }
   }
@@ -252,6 +261,10 @@ export default class AppContainer extends React.Component {
 
   _onStart() {
     Actions.sendWSData('start', '');
+  }
+
+  _onCalculateScores() {
+    Actions.sendWSData('calculate-scores', '');
   }
 
   _onSubmitIdentity() {
@@ -300,18 +313,6 @@ export default class AppContainer extends React.Component {
     });
   }
 
-  _onAddVote(idx) {
-    const playerAnswers = this.state.playerAnswers;
-    playerAnswers[idx].votes += 1;
-    this.setState(playerAnswers);
-  }
-
-  _onRemoveVote(idx) {
-    const playerAnswers = this.state.playerAnswers;
-    playerAnswers[idx].votes = Math.max(0, playerAnswers[idx].votes - 1);
-    this.setState(playerAnswers);
-  }
-
   _onErrorDialogClose() {
     this.setState({
       error: {
@@ -333,6 +334,15 @@ export default class AppContainer extends React.Component {
   _onCategoryChange(evt, idx, value) {
     this.setState({category: value});
     Actions.sendWSData("category-change", value);
+  }
+
+  _onAddVote(votedFor, evt, idx, whoVoted) {
+    // value := username of vote for
+    Actions.sendWSData("add-vote", {who: whoVoted, votedFor: votedFor});
+  }
+
+  _onRemoveVote(votedFor) {
+    Actions.sendWSData("remove-vote", votedFor);
   }
 
   _onClueChange(evt, value) {
@@ -511,28 +521,66 @@ export default class AppContainer extends React.Component {
           <div style={{padding: "10px"}}>
             {this.state.playerAnswers.map((answer, i) => {
               return <Card key={i}>
-                <CardTitle title={answer.name} subtitle={answer.votes + " votes"} />
+                <CardTitle title={answer.name} subtitle={answer.votes.length + " vote" + (answer.votes.length === 1 ? "" : "s")} />
                 <CardText>{answer.answer}</CardText>
+
+                <div style={{marginLeft: "15px", marginRight: "15px"}}>
+                  {answer.votes.map((v, i) => {
+                    return <Chip onRequestDelete={this._onRemoveVote.bind(null, v)} key={i}>{v}</Chip>
+                  })}
+                </div>
+
                 <CardActions>
-                  <RaisedButton label="Add vote" primary={true} onClick={() => this._onAddVote(i)} />
-                  <RaisedButton label="Remove vote" secondary={true} onClick={() => this._onRemoveVote(i)} />
+                  {this.state.toVote.length === 0 ? <div></div> :
+                    <SelectField floatingLabelText="Add vote"
+                                 fullWidth={true}
+                                 disabled={this.state.toVote.length === 0}
+                                 onChange={this._onAddVote.bind(null, answer.name)} >
+                      {this.state.toVote.map((p, i) => <MenuItem key={i} value={p} primaryText={p} />)}
+                    </SelectField>
+                  }
                 </CardActions>
               </Card>;
             })}
           </div>
           <div style={{width: "100%", height: "30px"}}></div>
-          <RaisedButton label="Next round!" primary={true} fullWidth={true} onClick={this._onStart}/>
+          <RaisedButton label="Calculate scores"
+                        primary={true}
+                        fullWidth={true}
+                        disabled={this.state.toVote.length !== 0}
+                        onClick={this._onCalculateScores} />
         </div>
         break;
       case 'listen-to-reading':
         content = <div>
           <RaisedButton label={"Leave " + this.state.game} secondary={true} fullWidth={true} onClick={this._onLeave}/>
-          <div style={{padding: "10px"}}>
-            <div style={{paddingTop: window.innerHeight / 2 - 80, width: "100%"}}></div>
-              <p style={{textAlign: "center"}}>Listen to the answers and vote!</p>
+            <div style={{padding: "10px"}}>
+              <div style={{paddingTop: window.innerHeight / 2 - 80, width: "100%"}}></div>
+              <p style={{textAlign: "center", fontSize: "18px"}}>Listen to the answers and vote!</p>
+              <p style={{textAlign: "center"}}>Your votes:</p>
+              <p style={{textAlign: "center", fontSize: "36px"}}>{this.state.myVotes}</p>
             </div>
           </div>;
           break;
+      case 'scoring':
+        content = <div>
+          <RaisedButton label={"Leave " + this.state.game} secondary={true} fullWidth={true} onClick={this._onLeave}/>
+          <div style={{padding: "10px"}}>
+            <h2>Scores</h2>
+            {this.state.scoreDetails.map((sd, i) => {
+              return <Card key={i}>
+                <CardTitle title={sd.name} subtitle={sd.points + " point" + (sd.points === 1 ? "" : "s")} />
+                <CardText>
+                  {sd.details.map((d, i) => {
+                    return <p key={i + "_d"}>{d}</p>
+                  })}
+                </CardText>
+              </Card>
+            })}
+          </div>
+        <RaisedButton label="Next round" primary={true} fullWidth={true} onClick={this._onStart} />
+        </div>
+        break;
     }
 
     const errorDialogActions = [

@@ -9,8 +9,8 @@ const _queue = [];  // fifo
 
 const _connect = () => {
 
-  // let _connection = new WebSocket("wss://dashwithmash.com/ws");
-  let _connection = new WebSocket("ws://10.1.1.9:8081");
+  let _connection = new WebSocket("wss://dashwithmash.com/ws");
+  // let _connection = new WebSocket("ws://localhost:8081");
 
   _connection.onopen = () => {
     _requiresReconnect = false;
